@@ -1,40 +1,23 @@
 import os
-
-import dotenv
-from azure.identity import DefaultAzureCredential
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from langchain import agents, hub
-from langchain_azure_dynamic_sessions import SessionsPythonREPLTool
-from langchain_openai import AzureChatOpenAI
-
-dotenv.load_dotenv()
+from langchain.llms import Ollama
+from langchain_community.tools import PythonREPLTool
 
 app = FastAPI()
-
 
 @app.get("/")
 async def root():
     return RedirectResponse("/docs")
 
-
 @app.get("/chat")
 async def chat(message: str):
-    credential = DefaultAzureCredential()
-    pool_management_endpoint = os.getenv("POOL_MANAGEMENT_ENDPOINT")
-    openai_api_key = credential.get_token(
-        "https://cognitiveservices.azure.com/.default"
-    ).token
+    # Initialize Ollama LLM
+    llm = Ollama(model="llama2")  # You can change this to your preferred Ollama model
 
-    llm = AzureChatOpenAI(
-        api_key=openai_api_key,
-        azure_deployment="gpt-35-turbo",
-        openai_api_version="2024-02-01",
-        openai_api_type="azure_ad",
-        temperature=0,
-    )
-
-    repl = SessionsPythonREPLTool(pool_management_endpoint=pool_management_endpoint)
+    # Initialize Python REPL tool
+    repl = PythonREPLTool()
 
     tools = [repl]
     prompt = hub.pull("hwchase17/openai-functions-agent")

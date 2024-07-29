@@ -1,94 +1,58 @@
 import os
-from typing import Any, List, Optional
-from langchain.tools import BaseTool
-from langchain_community.llms import Ollama
-from langchain.agents import initialize_agent, AgentType
-from azure.identity import DefaultAzureCredential
-from azure.core.exceptions import ClientAuthenticationError
-import requests
-from pydantic import Field
-from dotenv import load_dotenv
+from typing import Optional
+
+import dotenv
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import RedirectResponse
+from langchain import agents, hub
+from langchain_groq import ChatGroq
+from langchain_azure_dynamic_sessions import SessionsPythonREPLTool
+
+dotenv.load_dotenv()
+
+app = FastAPI()
 
 
-#Passing Environment Variables
+@app.get("/")
+async def root():
+    return RedirectResponse("/docs")
 
-load_dotenv()
 
+@app.get("/chat")
+async def chat(message: Optional[str] = Query(None, description="The message to process")):
+    if not message:
+        raise HTTPException(status_code=400, detail="Message parameter is required")
 
+    try:
+        pool_management_endpoint = os.getenv("POOL_MANAGEMENT_ENDPOINT")
+        if not pool_management_endpoint:
+            raise ValueError("POOL_MANAGEMENT_ENDPOINT environment variable is not set")
 
-class AzureDynamicSessionsTool(BaseTool):
-    name = "Azure Dynamic Sessions Python REPL"
-    description = "A Python REPL connected to Azure Dynamic Sessions. Use this to execute Python code in the cloud."
+        groq_api_key = os.getenv("GROQ_API_KEY")
+        if not groq_api_key:
+            raise ValueError("GROQ_API_KEY environment variable is not set")
 
-    pool_management_endpoint: str= Field(..., description="The endpoint for the Azure Dynamic Sessions pool")
-    credential: Optional[DefaultAzureCredential] =Field(default=None, description="The credential for the Azure Dynamic Sessions pool")
-
-    def __init__(self, pool_management_endpoint: str):
-        super().__init__()
-        self.pool_management_endpoint = pool_management_endpoint
-        self.credential = self._get_azure_credential()
-
-    def _get_azure_credential(self) -> Optional[DefaultAzureCredential]:
-        try:
-            credential = DefaultAzureCredential()
-            # Test the credential
-            credential.get_token("https://management.azure.com/.default")
-            print("Successfully authenticated with Azure")
-            return credential
-        except ClientAuthenticationError as e:
-            print(f"Authentication failed: {str(e)}")
-            return None
-
-    def _run(self, code: str) -> str:
-        if not self.credential:
-            raise ValueError("Azure authentication failed")
-
-        token = self.credential.get_token("https://dynamicsessions.io/.default")
-        headers = {
-            "Authorization": f"Bearer {token.token}",
-            "Content-Type": "application/json"
-        }
-
-        body = {
-            "properties": {
-                "codeInputType": "inline",
-                "executionType": "synchronous",
-                "code": code
-            }
-        }
-
-        response = requests.post(
-            f"{self.pool_management_endpoint}code/execute",
-            headers=headers,
-            json=body
+        llm = ChatGroq(
+            groq_api_key=groq_api_key,
+            model_name="llama3-groq-70b-8192-tool-use-preview",  # Replace with the appropriate Groq model
+            temperature=0,
         )
-        response.raise_for_status()
 
-        result = response.json().get("properties", {})
-        return f"Result: {result.get('result')}\nStdout: {result.get('stdout')}\nStderr: {result.get('stderr')}"
+        repl = SessionsPythonREPLTool(pool_management_endpoint=pool_management_endpoint)
 
-    async def _arun(self, code: str) -> str:
-        # For simplicity, we're using the synchronous version
-        # In a real async environment, you'd want to use aiohttp for async HTTP requests
-        return self._run(code)
+        tools = [repl]
+        prompt = hub.pull("hwchase17/openai-functions-agent")
+        agent = agents.create_tool_calling_agent(llm, tools, prompt)
 
-# Create an instance of the AzureDynamicSessionsTool
-azure_tool = AzureDynamicSessionsTool(
-    pool_management_endpoint=os.environ['POOL_MANAGEMENT_ENDPOINT']
-)
+        agent_executor = agents.AgentExecutor(
+            agent=agent, tools=tools, verbose=True, handle_parsing_errors=True
+        )
 
-# Initialize the Ollama LLM
-llm = Ollama(model="codellama")
+        response = agent_executor.invoke({"input": message})
 
-# Create an agent that uses the Ollama LLM and the Azure Dynamic Sessions tool
-agent = initialize_agent(
-    tools=[azure_tool],
-    llm=llm,
-    agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
-    verbose=True
-)
+        return {"output": response["output"]}
 
-# Example usage of the agent
-task = "Calculate the factorial of 5 and print the result"
-result = agent.run(task)
-print(result)
+    except ValueError as ve:
+        raise HTTPException(status_code=500, detail=str(ve))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
